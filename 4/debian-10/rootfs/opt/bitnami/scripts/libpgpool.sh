@@ -63,6 +63,11 @@ export PGPOOL_ENABLE_LOAD_BALANCING="${PGPOOL_ENABLE_LOAD_BALANCING:-yes}"
 export PGPOOL_DISABLE_LOAD_BALANCE_ON_WRITE="${PGPOOL_DISABLE_LOAD_BALANCE_ON_WRITE:-transaction}"
 export PGPOOL_NUM_INIT_CHILDREN="${PGPOOL_NUM_INIT_CHILDREN:-32}"
 
+# SSL
+export PGPOOL_ENABLE_TLS="${PGPOOL_ENABLE_TLS:-no}"
+export PGPOOL_TLS_CERT_FILE="${PGPOOL_TLS_CERT_FILE:-}"
+export PGPOOL_TLS_KEY_FILE="${PGPOOL_TLS_KEY_FILE:-}"
+
 EOF
     if [[ -f "${PGPOOL_ADMIN_PASSWORD_FILE:-}" ]]; then
         cat << "EOF"
@@ -161,6 +166,17 @@ pgpool_validate() {
     if ! [[ "$PGPOOL_DISABLE_LOAD_BALANCE_ON_WRITE" =~ ^(off|transaction|trans_transaction|always)$ ]]; then
 	    print_validation_error "The values allowed for PGPOOL_DISABLE_LOAD_BALANCE_ON_WRITE: off,transaction,trans_transaction,always"
     fi
+    if ! is_yes_no_value "$PGPOOL_ENABLE_TLS"; then
+        empty_password_error "The values allowed for PGPOOL_ENABLE_TLS are: yes or no"
+    fi
+    if is_boolean_yes "$PGPOOL_ENABLE_TLS"; then
+        if [[ -z "$PGPOOL_TLS_CERT_FILE" ]]; then
+            print_validation_error "PGPOOL_TLS_CERT_FILE has to be provided"
+        fi
+        if [[ -z "$PGPOOL_TLS_KEY_FILE" ]]; then
+            print_validation_error "PGPOOL_TLS_KEY_FILE has to be provided"
+        fi
+    fi
     [[ "$error_code" -eq 0 ]] || exit "$error_code"
 }
 
@@ -214,19 +230,23 @@ pgpool_healthcheck() {
 pgpool_create_pghba() {
     local authentication="md5"
     local postgres_auth_line=""
+    local connection_type="host"
     info "Generating pg_hba.conf file..."
 
     is_boolean_yes "$PGPOOL_ENABLE_LDAP" && authentication="pam pamservice=pgpool"
+    if is_boolean_yes "$PGPOOL_ENABLE_TLS"; then
+        connection_type="hostssl"
+    fi
     if is_boolean_yes "$PGPOOL_ENABLE_POOL_PASSWD"; then
-        postgres_auth_line="host     all             ${PGPOOL_POSTGRES_USERNAME}       all         md5"
+        postgres_auth_line="$connection_type     all             ${PGPOOL_POSTGRES_USERNAME}       all         md5"
     fi
     cat > "$PGPOOL_PGHBA_FILE" << EOF
 local    all             all                            trust
-host     all             $PGPOOL_SR_CHECK_USER       all         trust
+$connection_type     all             $PGPOOL_SR_CHECK_USER       all         trust
 $postgres_auth_line
-host     all             wide               all         trust
-host     all             pop_user           all         trust
-host     all             all                all         $authentication
+$connection_type     all             wide               all         trust
+$connection_type     all             pop_user           all         trust
+$connection_type     all             all                all         $authentication
 EOF
 }
 
@@ -334,6 +354,12 @@ pgpool_create_config() {
     pgpool_set_property "port" "$PGPOOL_PORT_NUMBER"
     pgpool_set_property "socket_dir" "$PGPOOL_TMP_DIR"
     pgpool_set_property "num_init_children" "$PGPOOL_NUM_INIT_CHILDREN"
+    # SSL
+    if is_boolean_yes "$PGPOOL_ENABLE_TLS"; then
+        pgpool_set_property "ssl" "on"
+        pgpool_set_property "ssl_cert" "${PGPOOL_TLS_CERT_FILE}"
+        pgpool_set_property "ssl_key" "${PGPOOL_TLS_KEY_FILE}"
+    fi
     # Communication Manager Connection settings
     pgpool_set_property "pcp_socket_dir" "$PGPOOL_TMP_DIR"
     # Authentication settings
@@ -369,6 +395,12 @@ pgpool_create_config() {
     pgpool_set_property "search_primary_node_timeout" "0"
     pgpool_set_property "disable_load_balance_on_write" "$PGPOOL_DISABLE_LOAD_BALANCE_ON_WRITE"
     pgpool_set_property "num_init_children" "$PGPOOL_NUM_INIT_CHILDREN"
+
+    # Extended logging
+    if ${BITNAMI_DEBUG:-false}; then
+        pgpool_set_property "log_min_messages" "DEBUG5"
+        pgpool_set_property "client_min_messages" "DEBUG5"
+    fi
 
     # Backend settings
     read -r -a nodes <<< "$(tr ',;' ' ' <<< "${PGPOOL_BACKEND_NODES}")"
